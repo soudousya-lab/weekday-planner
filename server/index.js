@@ -1,132 +1,72 @@
 const express = require('express');
 const cors = require('cors');
 const webpush = require('web-push');
-const initSqlJs = require('sql.js');
 const cron = require('node-cron');
 const path = require('path');
-const fs = require('fs');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// Supabase client
+const supabaseUrl = process.env.SUPABASE_URL || 'https://wwxtkfditekjjcrhydsl.supabase.co';
+const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind3eHRrZmRpdGVrampjcmh5ZHNsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzMDQyODEsImV4cCI6MjA4Mzg4MDI4MX0.d-ehZ4BaX8u3XIrqWemoPv28Qy73Or1Wp-u9sL_qv8w';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Serve static files in production
+// Serve static files in production with correct MIME types
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/out')));
-}
-
-// Database
-let db;
-const dbPath = process.env.DATABASE_PATH || path.join(__dirname, 'planner.db');
-
-async function initDatabase() {
-  const SQL = await initSqlJs();
-
-  // Try to load existing database
-  try {
-    if (fs.existsSync(dbPath)) {
-      const fileBuffer = fs.readFileSync(dbPath);
-      db = new SQL.Database(fileBuffer);
-      console.log('Loaded existing database');
-    } else {
-      db = new SQL.Database();
-      console.log('Created new database');
+  app.use(express.static(path.join(__dirname, '../client/out'), {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.css')) {
+        res.setHeader('Content-Type', 'text/css');
+      } else if (filePath.endsWith('.js')) {
+        res.setHeader('Content-Type', 'application/javascript');
+      } else if (filePath.endsWith('.json')) {
+        res.setHeader('Content-Type', 'application/json');
+      } else if (filePath.endsWith('.svg')) {
+        res.setHeader('Content-Type', 'image/svg+xml');
+      }
     }
-  } catch (error) {
-    console.error('Error loading database:', error);
-    db = new SQL.Database();
-  }
-
-  // Create tables
-  db.run(`
-    CREATE TABLE IF NOT EXISTS subscriptions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      endpoint TEXT UNIQUE NOT NULL,
-      keys_p256dh TEXT NOT NULL,
-      keys_auth TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS scheduled_notifications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      subscription_id INTEGER NOT NULL,
-      event_id TEXT NOT NULL,
-      event_label TEXT NOT NULL,
-      scheduled_time TEXT NOT NULL,
-      notified INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE
-    )
-  `);
-
-  db.run(`
-    CREATE TABLE IF NOT EXISTS vapid_keys (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      public_key TEXT NOT NULL,
-      private_key TEXT NOT NULL
-    )
-  `);
-
-  // History records table
-  db.run(`
-    CREATE TABLE IF NOT EXISTS daily_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      date TEXT UNIQUE NOT NULL,
-      arrival_hour INTEGER NOT NULL,
-      arrival_minute INTEGER NOT NULL,
-      has_dinner INTEGER NOT NULL,
-      has_laundry INTEGER NOT NULL,
-      study_minutes INTEGER NOT NULL,
-      total_free_time INTEGER NOT NULL,
-      schedule_json TEXT NOT NULL,
-      completed_tasks TEXT DEFAULT '[]',
-      notes TEXT DEFAULT '',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-
-  saveDatabase();
-}
-
-function saveDatabase() {
-  try {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    fs.writeFileSync(dbPath, buffer);
-  } catch (error) {
-    console.error('Error saving database:', error);
-  }
+  }));
 }
 
 // Generate or retrieve VAPID keys
-function getVapidKeys() {
-  const result = db.exec('SELECT * FROM vapid_keys WHERE id = 1');
-  if (result.length > 0 && result[0].values.length > 0) {
-    const row = result[0].values[0];
-    return { publicKey: row[1], privateKey: row[2] };
+async function getVapidKeys() {
+  const { data, error } = await supabase
+    .from('vapid_keys')
+    .select('*')
+    .eq('id', 1)
+    .single();
+
+  if (data) {
+    return { publicKey: data.public_key, privateKey: data.private_key };
   }
 
+  // Generate new keys
   const vapidKeys = webpush.generateVAPIDKeys();
-  db.run('INSERT INTO vapid_keys (id, public_key, private_key) VALUES (1, ?, ?)',
-    [vapidKeys.publicKey, vapidKeys.privateKey]);
-  saveDatabase();
+  await supabase
+    .from('vapid_keys')
+    .insert({ id: 1, public_key: vapidKeys.publicKey, private_key: vapidKeys.privateKey });
 
   return vapidKeys;
 }
 
 // API Routes
-app.get('/api/vapid-public-key', (req, res) => {
-  const vapidKeys = getVapidKeys();
-  res.json({ publicKey: vapidKeys.publicKey });
+app.get('/api/vapid-public-key', async (req, res) => {
+  try {
+    const vapidKeys = await getVapidKeys();
+    res.json({ publicKey: vapidKeys.publicKey });
+  } catch (error) {
+    console.error('Get VAPID key error:', error);
+    res.status(500).json({ error: 'Failed to get VAPID key' });
+  }
 });
 
-app.post('/api/subscribe', (req, res) => {
+app.post('/api/subscribe', async (req, res) => {
   const { subscription } = req.body;
 
   if (!subscription || !subscription.endpoint || !subscription.keys) {
@@ -135,36 +75,45 @@ app.post('/api/subscribe', (req, res) => {
 
   try {
     // Check if subscription exists
-    const existing = db.exec('SELECT id FROM subscriptions WHERE endpoint = ?', [subscription.endpoint]);
+    const { data: existing } = await supabase
+      .from('subscriptions')
+      .select('id')
+      .eq('endpoint', subscription.endpoint)
+      .single();
 
-    if (existing.length > 0 && existing[0].values.length > 0) {
+    if (existing) {
       // Update existing
-      db.run('UPDATE subscriptions SET keys_p256dh = ?, keys_auth = ? WHERE endpoint = ?',
-        [subscription.keys.p256dh, subscription.keys.auth, subscription.endpoint]);
+      await supabase
+        .from('subscriptions')
+        .update({ keys_p256dh: subscription.keys.p256dh, keys_auth: subscription.keys.auth })
+        .eq('endpoint', subscription.endpoint);
+      res.json({ success: true, subscriptionId: existing.id });
     } else {
       // Insert new
-      db.run('INSERT INTO subscriptions (endpoint, keys_p256dh, keys_auth) VALUES (?, ?, ?)',
-        [subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth]);
+      const { data, error } = await supabase
+        .from('subscriptions')
+        .insert({
+          endpoint: subscription.endpoint,
+          keys_p256dh: subscription.keys.p256dh,
+          keys_auth: subscription.keys.auth
+        })
+        .select('id')
+        .single();
+
+      if (error) throw error;
+      res.json({ success: true, subscriptionId: data.id });
     }
-
-    saveDatabase();
-
-    const result = db.exec('SELECT id FROM subscriptions WHERE endpoint = ?', [subscription.endpoint]);
-    const subscriptionId = result[0].values[0][0];
-
-    res.json({ success: true, subscriptionId });
   } catch (error) {
     console.error('Subscribe error:', error);
     res.status(500).json({ error: 'Failed to save subscription' });
   }
 });
 
-app.post('/api/unsubscribe', (req, res) => {
+app.post('/api/unsubscribe', async (req, res) => {
   const { endpoint } = req.body;
 
   try {
-    db.run('DELETE FROM subscriptions WHERE endpoint = ?', [endpoint]);
-    saveDatabase();
+    await supabase.from('subscriptions').delete().eq('endpoint', endpoint);
     res.json({ success: true });
   } catch (error) {
     console.error('Unsubscribe error:', error);
@@ -172,7 +121,7 @@ app.post('/api/unsubscribe', (req, res) => {
   }
 });
 
-app.post('/api/schedule-notification', (req, res) => {
+app.post('/api/schedule-notification', async (req, res) => {
   const { subscriptionEndpoint, eventId, eventLabel, scheduledTime } = req.body;
 
   if (!subscriptionEndpoint || !eventId || !eventLabel || !scheduledTime) {
@@ -180,49 +129,62 @@ app.post('/api/schedule-notification', (req, res) => {
   }
 
   try {
-    const subResult = db.exec('SELECT id FROM subscriptions WHERE endpoint = ?', [subscriptionEndpoint]);
+    const { data: sub } = await supabase
+      .from('subscriptions')
+      .select('id')
+      .eq('endpoint', subscriptionEndpoint)
+      .single();
 
-    if (subResult.length === 0 || subResult[0].values.length === 0) {
+    if (!sub) {
       return res.status(404).json({ error: 'Subscription not found' });
     }
 
-    const subscriptionId = subResult[0].values[0][0];
-
     // Remove existing notification for this event
-    db.run('DELETE FROM scheduled_notifications WHERE subscription_id = ? AND event_id = ?',
-      [subscriptionId, eventId]);
+    await supabase
+      .from('scheduled_notifications')
+      .delete()
+      .eq('subscription_id', sub.id)
+      .eq('event_id', eventId);
 
     // Add new notification
-    db.run('INSERT INTO scheduled_notifications (subscription_id, event_id, event_label, scheduled_time) VALUES (?, ?, ?, ?)',
-      [subscriptionId, eventId, eventLabel, scheduledTime]);
+    const { data, error } = await supabase
+      .from('scheduled_notifications')
+      .insert({
+        subscription_id: sub.id,
+        event_id: eventId,
+        event_label: eventLabel,
+        scheduled_time: scheduledTime
+      })
+      .select('id')
+      .single();
 
-    saveDatabase();
-
-    const result = db.exec('SELECT last_insert_rowid()');
-    const notificationId = result[0].values[0][0];
-
-    res.json({ success: true, notificationId });
+    if (error) throw error;
+    res.json({ success: true, notificationId: data.id });
   } catch (error) {
     console.error('Schedule notification error:', error);
     res.status(500).json({ error: 'Failed to schedule notification' });
   }
 });
 
-app.post('/api/cancel-notification', (req, res) => {
+app.post('/api/cancel-notification', async (req, res) => {
   const { subscriptionEndpoint, eventId } = req.body;
 
   try {
-    const subResult = db.exec('SELECT id FROM subscriptions WHERE endpoint = ?', [subscriptionEndpoint]);
+    const { data: sub } = await supabase
+      .from('subscriptions')
+      .select('id')
+      .eq('endpoint', subscriptionEndpoint)
+      .single();
 
-    if (subResult.length === 0 || subResult[0].values.length === 0) {
+    if (!sub) {
       return res.status(404).json({ error: 'Subscription not found' });
     }
 
-    const subscriptionId = subResult[0].values[0][0];
-
-    db.run('DELETE FROM scheduled_notifications WHERE subscription_id = ? AND event_id = ?',
-      [subscriptionId, eventId]);
-    saveDatabase();
+    await supabase
+      .from('scheduled_notifications')
+      .delete()
+      .eq('subscription_id', sub.id)
+      .eq('event_id', eventId);
 
     res.json({ success: true });
   } catch (error) {
@@ -231,7 +193,7 @@ app.post('/api/cancel-notification', (req, res) => {
   }
 });
 
-app.get('/api/scheduled-notifications', (req, res) => {
+app.get('/api/scheduled-notifications', async (req, res) => {
   const { endpoint } = req.query;
 
   if (!endpoint) {
@@ -239,27 +201,29 @@ app.get('/api/scheduled-notifications', (req, res) => {
   }
 
   try {
-    const subResult = db.exec('SELECT id FROM subscriptions WHERE endpoint = ?', [endpoint]);
+    const { data: sub } = await supabase
+      .from('subscriptions')
+      .select('id')
+      .eq('endpoint', endpoint)
+      .single();
 
-    if (subResult.length === 0 || subResult[0].values.length === 0) {
+    if (!sub) {
       return res.json({ notifications: [] });
     }
 
-    const subscriptionId = subResult[0].values[0][0];
+    const { data: notifications } = await supabase
+      .from('scheduled_notifications')
+      .select('event_id, event_label, scheduled_time')
+      .eq('subscription_id', sub.id)
+      .eq('notified', false);
 
-    const result = db.exec(`
-      SELECT event_id, event_label, scheduled_time
-      FROM scheduled_notifications
-      WHERE subscription_id = ? AND notified = 0
-    `, [subscriptionId]);
-
-    const notifications = result.length > 0 ? result[0].values.map(row => ({
-      event_id: row[0],
-      event_label: row[1],
-      scheduled_time: row[2]
-    })) : [];
-
-    res.json({ notifications });
+    res.json({
+      notifications: (notifications || []).map(n => ({
+        event_id: n.event_id,
+        event_label: n.event_label,
+        scheduled_time: n.scheduled_time
+      }))
+    });
   } catch (error) {
     console.error('Get notifications error:', error);
     res.status(500).json({ error: 'Failed to get notifications' });
@@ -282,8 +246,7 @@ async function sendPushNotification(subscription, payload) {
   } catch (error) {
     console.error('Push notification error:', error);
     if (error.statusCode === 410) {
-      db.run('DELETE FROM subscriptions WHERE id = ?', [subscription.id]);
-      saveDatabase();
+      await supabase.from('subscriptions').delete().eq('id', subscription.id);
     }
     return false;
   }
@@ -291,75 +254,70 @@ async function sendPushNotification(subscription, payload) {
 
 // Check and send scheduled notifications every minute
 cron.schedule('* * * * *', async () => {
-  if (!db) return;
-
   const now = new Date();
   const currentTime = now.toTimeString().slice(0, 5); // HH:MM format
 
   console.log(`[${now.toISOString()}] Checking notifications for ${currentTime}`);
 
-  const result = db.exec(`
-    SELECT sn.id, sn.event_id, sn.event_label, s.id as sub_id, s.endpoint, s.keys_p256dh, s.keys_auth
-    FROM scheduled_notifications sn
-    JOIN subscriptions s ON sn.subscription_id = s.id
-    WHERE sn.scheduled_time = ? AND sn.notified = 0
-  `, [currentTime]);
+  try {
+    const { data: notifications } = await supabase
+      .from('scheduled_notifications')
+      .select(`
+        id, event_id, event_label,
+        subscriptions (id, endpoint, keys_p256dh, keys_auth)
+      `)
+      .eq('scheduled_time', currentTime)
+      .eq('notified', false);
 
-  if (result.length === 0 || result[0].values.length === 0) return;
+    if (!notifications || notifications.length === 0) return;
 
-  const vapidKeys = getVapidKeys();
-  webpush.setVapidDetails(
-    'mailto:planner@example.com',
-    vapidKeys.publicKey,
-    vapidKeys.privateKey
-  );
+    const vapidKeys = await getVapidKeys();
+    webpush.setVapidDetails(
+      'mailto:planner@example.com',
+      vapidKeys.publicKey,
+      vapidKeys.privateKey
+    );
 
-  for (const row of result[0].values) {
-    const notification = {
-      id: row[0],
-      event_id: row[1],
-      event_label: row[2],
-      sub_id: row[3],
-      endpoint: row[4],
-      keys_p256dh: row[5],
-      keys_auth: row[6]
-    };
+    for (const notification of notifications) {
+      const payload = {
+        title: 'Weekday Planner',
+        body: `${notification.event_label}の時間です`,
+        icon: '/icon.svg',
+        badge: '/icon.svg',
+        tag: notification.event_id,
+        data: {
+          eventId: notification.event_id,
+          url: '/'
+        }
+      };
 
-    const payload = {
-      title: 'Weekday Planner',
-      body: `${notification.event_label}の時間です`,
-      icon: '/icon.svg',
-      badge: '/icon.svg',
-      tag: notification.event_id,
-      data: {
-        eventId: notification.event_id,
-        url: '/'
+      const success = await sendPushNotification(notification.subscriptions, payload);
+
+      if (success) {
+        await supabase
+          .from('scheduled_notifications')
+          .update({ notified: true })
+          .eq('id', notification.id);
+        console.log(`Sent notification for ${notification.event_label}`);
       }
-    };
-
-    const success = await sendPushNotification({
-      id: notification.sub_id,
-      endpoint: notification.endpoint,
-      keys_p256dh: notification.keys_p256dh,
-      keys_auth: notification.keys_auth
-    }, payload);
-
-    if (success) {
-      db.run('UPDATE scheduled_notifications SET notified = 1 WHERE id = ?', [notification.id]);
-      saveDatabase();
-      console.log(`Sent notification for ${notification.event_label}`);
     }
-  }
 
-  // Clean up old notifications
-  db.run(`DELETE FROM scheduled_notifications WHERE notified = 1 AND created_at < datetime('now', '-1 day')`);
-  saveDatabase();
+    // Clean up old notifications
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+    await supabase
+      .from('scheduled_notifications')
+      .delete()
+      .eq('notified', true)
+      .lt('created_at', yesterday);
+  } catch (error) {
+    console.error('Cron job error:', error);
+  }
 });
 
 // ============ History API ============
 
 // Save or update daily record
-app.post('/api/records', (req, res) => {
+app.post('/api/records', async (req, res) => {
   const { date, arrivalHour, arrivalMinute, hasDinner, hasLaundry, studyMinutes, totalFreeTime, schedule, completedTasks, notes } = req.body;
 
   if (!date || arrivalHour === undefined || arrivalMinute === undefined) {
@@ -367,29 +325,45 @@ app.post('/api/records', (req, res) => {
   }
 
   try {
-    const existing = db.exec('SELECT id FROM daily_records WHERE date = ?', [date]);
+    const { data: existing } = await supabase
+      .from('daily_records')
+      .select('id')
+      .eq('date', date)
+      .single();
 
-    if (existing.length > 0 && existing[0].values.length > 0) {
-      db.run(`
-        UPDATE daily_records
-        SET arrival_hour = ?, arrival_minute = ?, has_dinner = ?, has_laundry = ?,
-            study_minutes = ?, total_free_time = ?, schedule_json = ?,
-            completed_tasks = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE date = ?
-      `, [arrivalHour, arrivalMinute, hasDinner ? 1 : 0, hasLaundry ? 1 : 0,
-          studyMinutes, totalFreeTime, JSON.stringify(schedule),
-          JSON.stringify(completedTasks || []), notes || '', date]);
+    if (existing) {
+      await supabase
+        .from('daily_records')
+        .update({
+          arrival_hour: arrivalHour,
+          arrival_minute: arrivalMinute,
+          has_dinner: hasDinner,
+          has_laundry: hasLaundry,
+          study_minutes: studyMinutes,
+          total_free_time: totalFreeTime,
+          schedule_json: schedule,
+          completed_tasks: completedTasks || [],
+          notes: notes || '',
+          updated_at: new Date().toISOString()
+        })
+        .eq('date', date);
     } else {
-      db.run(`
-        INSERT INTO daily_records (date, arrival_hour, arrival_minute, has_dinner, has_laundry,
-                                   study_minutes, total_free_time, schedule_json, completed_tasks, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [date, arrivalHour, arrivalMinute, hasDinner ? 1 : 0, hasLaundry ? 1 : 0,
-          studyMinutes, totalFreeTime, JSON.stringify(schedule),
-          JSON.stringify(completedTasks || []), notes || '']);
+      await supabase
+        .from('daily_records')
+        .insert({
+          date,
+          arrival_hour: arrivalHour,
+          arrival_minute: arrivalMinute,
+          has_dinner: hasDinner,
+          has_laundry: hasLaundry,
+          study_minutes: studyMinutes,
+          total_free_time: totalFreeTime,
+          schedule_json: schedule,
+          completed_tasks: completedTasks || [],
+          notes: notes || ''
+        });
     }
 
-    saveDatabase();
     res.json({ success: true });
   } catch (error) {
     console.error('Save record error:', error);
@@ -398,34 +372,37 @@ app.post('/api/records', (req, res) => {
 });
 
 // Get record by date
-app.get('/api/records/:date', (req, res) => {
+app.get('/api/records/:date', async (req, res) => {
   const { date } = req.params;
 
   try {
-    const result = db.exec('SELECT * FROM daily_records WHERE date = ?', [date]);
+    const { data, error } = await supabase
+      .from('daily_records')
+      .select('*')
+      .eq('date', date)
+      .single();
 
-    if (result.length === 0 || result[0].values.length === 0) {
+    if (!data) {
       return res.json({ record: null });
     }
 
-    const row = result[0].values[0];
-    const record = {
-      id: row[0],
-      date: row[1],
-      arrivalHour: row[2],
-      arrivalMinute: row[3],
-      hasDinner: row[4] === 1,
-      hasLaundry: row[5] === 1,
-      studyMinutes: row[6],
-      totalFreeTime: row[7],
-      schedule: JSON.parse(row[8]),
-      completedTasks: JSON.parse(row[9] || '[]'),
-      notes: row[10] || '',
-      createdAt: row[11],
-      updatedAt: row[12]
-    };
-
-    res.json({ record });
+    res.json({
+      record: {
+        id: data.id,
+        date: data.date,
+        arrivalHour: data.arrival_hour,
+        arrivalMinute: data.arrival_minute,
+        hasDinner: data.has_dinner,
+        hasLaundry: data.has_laundry,
+        studyMinutes: data.study_minutes,
+        totalFreeTime: data.total_free_time,
+        schedule: data.schedule_json,
+        completedTasks: data.completed_tasks || [],
+        notes: data.notes || '',
+        createdAt: data.created_at,
+        updatedAt: data.updated_at
+      }
+    });
   } catch (error) {
     console.error('Get record error:', error);
     res.status(500).json({ error: 'Failed to get record' });
@@ -433,48 +410,41 @@ app.get('/api/records/:date', (req, res) => {
 });
 
 // Get records for a date range
-app.get('/api/records', (req, res) => {
+app.get('/api/records', async (req, res) => {
   const { startDate, endDate, limit } = req.query;
 
   try {
-    let query = 'SELECT * FROM daily_records';
-    const params = [];
+    let query = supabase.from('daily_records').select('*').order('date', { ascending: false });
 
     if (startDate && endDate) {
-      query += ' WHERE date BETWEEN ? AND ?';
-      params.push(startDate, endDate);
+      query = query.gte('date', startDate).lte('date', endDate);
     } else if (startDate) {
-      query += ' WHERE date >= ?';
-      params.push(startDate);
+      query = query.gte('date', startDate);
     } else if (endDate) {
-      query += ' WHERE date <= ?';
-      params.push(endDate);
+      query = query.lte('date', endDate);
     }
-
-    query += ' ORDER BY date DESC';
 
     if (limit) {
-      query += ' LIMIT ?';
-      params.push(parseInt(limit));
+      query = query.limit(parseInt(limit));
     }
 
-    const result = db.exec(query, params);
+    const { data, error } = await query;
 
-    const records = result.length > 0 ? result[0].values.map(row => ({
-      id: row[0],
-      date: row[1],
-      arrivalHour: row[2],
-      arrivalMinute: row[3],
-      hasDinner: row[4] === 1,
-      hasLaundry: row[5] === 1,
-      studyMinutes: row[6],
-      totalFreeTime: row[7],
-      schedule: JSON.parse(row[8]),
-      completedTasks: JSON.parse(row[9] || '[]'),
-      notes: row[10] || '',
-      createdAt: row[11],
-      updatedAt: row[12]
-    })) : [];
+    const records = (data || []).map(row => ({
+      id: row.id,
+      date: row.date,
+      arrivalHour: row.arrival_hour,
+      arrivalMinute: row.arrival_minute,
+      hasDinner: row.has_dinner,
+      hasLaundry: row.has_laundry,
+      studyMinutes: row.study_minutes,
+      totalFreeTime: row.total_free_time,
+      schedule: row.schedule_json,
+      completedTasks: row.completed_tasks || [],
+      notes: row.notes || '',
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
 
     res.json({ records });
   } catch (error) {
@@ -484,12 +454,11 @@ app.get('/api/records', (req, res) => {
 });
 
 // Delete record
-app.delete('/api/records/:date', (req, res) => {
+app.delete('/api/records/:date', async (req, res) => {
   const { date } = req.params;
 
   try {
-    db.run('DELETE FROM daily_records WHERE date = ?', [date]);
-    saveDatabase();
+    await supabase.from('daily_records').delete().eq('date', date);
     res.json({ success: true });
   } catch (error) {
     console.error('Delete record error:', error);
@@ -498,26 +467,30 @@ app.delete('/api/records/:date', (req, res) => {
 });
 
 // Analytics API
-app.get('/api/analytics', (req, res) => {
+app.get('/api/analytics', async (req, res) => {
   const { days = 30 } = req.query;
 
   try {
-    const result = db.exec(`
-      SELECT * FROM daily_records
-      WHERE date >= date('now', '-${parseInt(days)} days')
-      ORDER BY date ASC
-    `);
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - parseInt(days));
+    const startDateStr = startDate.toISOString().split('T')[0];
 
-    const records = result.length > 0 ? result[0].values.map(row => ({
-      date: row[1],
-      arrivalHour: row[2],
-      arrivalMinute: row[3],
-      hasDinner: row[4] === 1,
-      hasLaundry: row[5] === 1,
-      studyMinutes: row[6],
-      totalFreeTime: row[7],
-      completedTasks: JSON.parse(row[9] || '[]')
-    })) : [];
+    const { data } = await supabase
+      .from('daily_records')
+      .select('*')
+      .gte('date', startDateStr)
+      .order('date', { ascending: true });
+
+    const records = (data || []).map(row => ({
+      date: row.date,
+      arrivalHour: row.arrival_hour,
+      arrivalMinute: row.arrival_minute,
+      hasDinner: row.has_dinner,
+      hasLaundry: row.has_laundry,
+      studyMinutes: row.study_minutes,
+      totalFreeTime: row.total_free_time,
+      completedTasks: row.completed_tasks || []
+    }));
 
     // Calculate analytics
     const totalDays = records.length;
@@ -594,29 +567,23 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Start server
-initDatabase().then(() => {
-  const vapidKeys = getVapidKeys();
-  webpush.setVapidDetails(
-    'mailto:planner@example.com',
-    vapidKeys.publicKey,
-    vapidKeys.privateKey
-  );
-  console.log('VAPID Public Key:', vapidKeys.publicKey);
+async function startServer() {
+  try {
+    const vapidKeys = await getVapidKeys();
+    webpush.setVapidDetails(
+      'mailto:planner@example.com',
+      vapidKeys.publicKey,
+      vapidKeys.privateKey
+    );
+    console.log('VAPID Public Key:', vapidKeys.publicKey);
 
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-}).catch(error => {
-  console.error('Failed to initialize database:', error);
-  process.exit(1);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, saving database...');
-  if (db) {
-    saveDatabase();
-    db.close();
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
   }
-  process.exit(0);
-});
+}
+
+startServer();
