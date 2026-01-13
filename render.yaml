@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: weekday-planner
+    env: node
+    buildCommand: npm install && cd client && npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
