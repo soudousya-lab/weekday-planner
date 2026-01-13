@@ -74,6 +74,8 @@ export default function WeekdayPlanner() {
   const [isSaving, setIsSaving] = useState(false);
   const [savedToday, setSavedToday] = useState(false);
   const [swRegistration, setSwRegistration] = useState<ServiceWorkerRegistration | null>(null);
+  const [isIOS, setIsIOS] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
 
   // History state
   const [historyRecords, setHistoryRecords] = useState<DailyRecord[]>([]);
@@ -103,6 +105,13 @@ export default function WeekdayPlanner() {
   // Initialize service worker and check notification permission
   useEffect(() => {
     const init = async () => {
+      // Check iOS and standalone mode
+      const iOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+      setIsIOS(iOS);
+      const standalone = window.matchMedia('(display-mode: standalone)').matches ||
+        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+      setIsStandalone(standalone);
+
       if ('Notification' in window) {
         setNotificationPermission(Notification.permission);
       }
@@ -447,11 +456,28 @@ export default function WeekdayPlanner() {
         </div>
       </div>
 
+      {/* iOS PWA Installation Guide */}
+      {isIOS && !isStandalone && (
+        <div className="bg-blue-500/10 border border-blue-400/30 rounded-xl p-4 mb-6">
+          <div className="flex items-center gap-3 mb-2">
+            <Bell className="w-5 h-5 text-blue-400 flex-shrink-0" />
+            <p className="text-blue-200 text-sm font-medium">
+              通知を使うには、アプリをインストールしてください
+            </p>
+          </div>
+          <ol className="text-blue-200/80 text-sm ml-8 list-decimal space-y-1">
+            <li>画面下部の<span className="inline-block mx-1">⬆️</span>（共有）をタップ</li>
+            <li>「ホーム画面に追加」を選択</li>
+            <li>追加されたアプリから開く</li>
+          </ol>
+        </div>
+      )}
+
       {/* Notification Permission Banner */}
-      {notificationPermission === 'default' && (
-        <div className="bg-amber-500/10 border border-amber-400/30 rounded-xl p-4 mb-6 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Bell className="w-5 h-5 text-amber-400" />
+      {notificationPermission === 'default' && (!isIOS || isStandalone) && (
+        <div className="bg-amber-500/10 border border-amber-400/30 rounded-xl p-4 mb-6">
+          <div className="flex items-center gap-3 mb-3">
+            <Bell className="w-5 h-5 text-amber-400 flex-shrink-0" />
             <p className="text-amber-200 text-sm">
               通知を有効にすると、各タスクの開始時刻にリマインドできます
             </p>
@@ -459,9 +485,9 @@ export default function WeekdayPlanner() {
           <button
             onClick={requestNotificationPermission}
             disabled={isLoading}
-            className="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+            className="w-full py-3 bg-amber-500/20 hover:bg-amber-500/30 active:bg-amber-500/40 text-amber-300 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 touch-manipulation"
           >
-            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : '有効にする'}
+            {isLoading ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : '通知を有効にする'}
           </button>
         </div>
       )}
