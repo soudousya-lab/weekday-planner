@@ -582,9 +582,13 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Serve client in production
+// Serve client in production - catch-all for SPA
 if (process.env.NODE_ENV === 'production') {
   app.get('*', (req, res) => {
+    // Don't serve index.html for API routes
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'Not found' });
+    }
     res.sendFile(path.join(__dirname, '../client/out/index.html'));
   });
 }
