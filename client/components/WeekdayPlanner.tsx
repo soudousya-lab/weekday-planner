@@ -239,13 +239,20 @@ export default function WeekdayPlanner() {
 
     const idealBathStart = 21 * 60;
     const bathDuration = 60;
+    const laundryDuration = hasLaundry ? 30 : 0;
 
+    // Calculate remaining time for study after bath and laundry
     let bathStart: number;
     if (currentTimeMinutes <= idealBathStart) {
       bathStart = idealBathStart;
     } else {
       bathStart = currentTimeMinutes;
     }
+
+    // Calculate how much time is available for study
+    const timeAfterBathAndLaundry = bathStart + bathDuration + laundryDuration;
+    const availableStudyTime = bedTime - timeAfterBathAndLaundry;
+    const actualStudyMinutes = Math.max(0, Math.min(studyMinutes, availableStudyTime));
 
     if (bathStart > currentTimeMinutes) {
       const freeTime = bathStart - currentTimeMinutes;
@@ -282,15 +289,17 @@ export default function WeekdayPlanner() {
       currentTimeMinutes += 30;
     }
 
-    events.push({
-      id: 'study',
-      time: currentTimeMinutes,
-      duration: studyMinutes,
-      label: '英語学習',
-      icon: BookOpen,
-      type: 'task',
-    });
-    currentTimeMinutes += studyMinutes;
+    if (actualStudyMinutes > 0) {
+      events.push({
+        id: 'study',
+        time: currentTimeMinutes,
+        duration: actualStudyMinutes,
+        label: actualStudyMinutes < studyMinutes ? `英語学習（${studyMinutes}分→${actualStudyMinutes}分に調整）` : '英語学習',
+        icon: BookOpen,
+        type: 'task',
+      });
+      currentTimeMinutes += actualStudyMinutes;
+    }
 
     if (currentTimeMinutes < bedTime) {
       events.push({
@@ -456,8 +465,8 @@ export default function WeekdayPlanner() {
         </div>
       </div>
 
-      {/* iOS PWA Installation Guide */}
-      {isIOS && !isStandalone && (
+      {/* iOS PWA Installation Guide - only show if notifications not enabled */}
+      {isIOS && !isStandalone && notificationPermission !== 'granted' && (
         <div className="bg-blue-500/10 border border-blue-400/30 rounded-xl p-4 mb-6">
           <div className="flex items-center gap-3 mb-2">
             <Bell className="w-5 h-5 text-blue-400 flex-shrink-0" />
@@ -473,7 +482,7 @@ export default function WeekdayPlanner() {
         </div>
       )}
 
-      {/* Notification Permission Banner */}
+      {/* Notification Permission Banner - only show if not yet granted */}
       {notificationPermission === 'default' && (!isIOS || isStandalone) && (
         <div className="bg-amber-500/10 border border-amber-400/30 rounded-xl p-4 mb-6">
           <div className="flex items-center gap-3 mb-3">
