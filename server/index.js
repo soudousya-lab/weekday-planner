@@ -19,14 +19,41 @@ app.use(express.json());
 
 // Serve static files in production with correct MIME types
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/out'), {
+  const staticPath = path.join(__dirname, '../client/out');
+
+  // Explicit handler for _next/static files to ensure correct MIME types
+  app.use('/_next/static', (req, res, next) => {
+    const filePath = path.join(staticPath, '_next/static', req.path);
+
+    // Set correct Content-Type based on file extension
+    if (req.path.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css; charset=utf-8');
+    } else if (req.path.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    } else if (req.path.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    } else if (req.path.endsWith('.woff2')) {
+      res.setHeader('Content-Type', 'font/woff2');
+    } else if (req.path.endsWith('.woff')) {
+      res.setHeader('Content-Type', 'font/woff');
+    }
+
+    res.sendFile(filePath, (err) => {
+      if (err) {
+        next(err);
+      }
+    });
+  });
+
+  // General static file handler
+  app.use(express.static(staticPath, {
     setHeaders: (res, filePath) => {
       if (filePath.endsWith('.css')) {
-        res.setHeader('Content-Type', 'text/css');
+        res.setHeader('Content-Type', 'text/css; charset=utf-8');
       } else if (filePath.endsWith('.js')) {
-        res.setHeader('Content-Type', 'application/javascript');
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
       } else if (filePath.endsWith('.json')) {
-        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
       } else if (filePath.endsWith('.svg')) {
         res.setHeader('Content-Type', 'image/svg+xml');
       }
