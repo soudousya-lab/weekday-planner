@@ -71,15 +71,17 @@ export default function WeekdayPlanner() {
     });
 
     if (hasDinner) {
+      const dinnerEarliestStart = 18 * 60 + 30; // 18:30
+      const dinnerStart = Math.max(currentTimeMinutes, dinnerEarliestStart);
       events.push({
         id: 'dinner',
-        time: currentTimeMinutes,
+        time: dinnerStart,
         duration: 60,
         label: '夕食（調理・食事）',
         icon: UtensilsCrossed,
         type: 'task',
       });
-      currentTimeMinutes += 60;
+      currentTimeMinutes = dinnerStart + 60;
     }
 
     const idealBathStart = 21 * 60;
