@@ -15,6 +15,7 @@ import {
   Check,
   Calendar,
   MapPin,
+  ShoppingCart,
 } from 'lucide-react';
 
 interface ScheduleEvent {
@@ -31,6 +32,7 @@ export default function WeekdayPlanner() {
   const [arrivalMinute, setArrivalMinute] = useState(0);
   const [hasDinner, setHasDinner] = useState(true);
   const [hasLaundry, setHasLaundry] = useState(false);
+  const [hasShopping, setHasShopping] = useState(false);
   const [studyMinutes, setStudyMinutes] = useState(45);
   const [completedTasks, setCompletedTasks] = useState<string[]>([]);
   const [currentTime, setCurrentTime] = useState(new Date());
@@ -62,6 +64,7 @@ export default function WeekdayPlanner() {
     const bedTime = 23 * 60;
     const bathDuration = 60;
     const laundryDuration = hasLaundry ? 30 : 0;
+    const shoppingDuration = hasShopping ? 60 : 0;
 
     events.push({
       id: 'arrival',
@@ -72,7 +75,20 @@ export default function WeekdayPlanner() {
       type: 'marker',
     });
 
-    // Calculate dinner start time (18:30 or later)
+    // Shopping right after arrival (if enabled)
+    if (hasShopping) {
+      events.push({
+        id: 'shopping',
+        time: currentTimeMinutes,
+        duration: shoppingDuration,
+        label: '買い物',
+        icon: ShoppingCart,
+        type: 'task',
+      });
+      currentTimeMinutes += shoppingDuration;
+    }
+
+    // Calculate dinner start time (18:30 or later, after shopping if any)
     const dinnerEarliestStart = 18 * 60 + 30; // 18:30
     const dinnerStart = hasDinner ? Math.max(currentTimeMinutes, dinnerEarliestStart) : currentTimeMinutes;
     const dinnerEnd = hasDinner ? dinnerStart + 60 : currentTimeMinutes;
@@ -207,7 +223,7 @@ export default function WeekdayPlanner() {
     });
 
     return events;
-  }, [arrivalHour, arrivalMinute, hasDinner, hasLaundry, studyMinutes]);
+  }, [arrivalHour, arrivalMinute, hasDinner, hasLaundry, hasShopping, studyMinutes]);
 
   const totalFreeTime = useMemo(() => {
     return schedule.filter((e) => e.type === 'free').reduce((sum, e) => sum + e.duration, 0);
@@ -222,10 +238,11 @@ export default function WeekdayPlanner() {
   const planName = useMemo(() => {
     const parts: string[] = [];
     parts.push(`${arrivalHour}:${arrivalMinute.toString().padStart(2, '0')}帰宅`);
-    parts.push(hasDinner ? '食事あり' : '食事なし');
+    if (hasShopping) parts.push('買い物');
+    if (hasDinner) parts.push('食事');
     if (hasLaundry) parts.push('洗濯');
     return parts.join(' / ');
-  }, [arrivalHour, arrivalMinute, hasDinner, hasLaundry]);
+  }, [arrivalHour, arrivalMinute, hasDinner, hasLaundry, hasShopping]);
 
   const isOvertime = totalFreeTime < 0;
 
@@ -332,7 +349,7 @@ export default function WeekdayPlanner() {
               }`}
             >
               <UtensilsCrossed className="w-5 h-5" />
-              <span>夕食あり</span>
+              <span>夕食</span>
             </button>
             <button
               onClick={() => setHasLaundry(!hasLaundry)}
@@ -343,7 +360,18 @@ export default function WeekdayPlanner() {
               }`}
             >
               <Shirt className="w-5 h-5" />
-              <span>洗濯あり</span>
+              <span>洗濯</span>
+            </button>
+            <button
+              onClick={() => setHasShopping(!hasShopping)}
+              className={`flex-1 py-4 px-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-3 ${
+                hasShopping
+                  ? 'bg-blue-500/20 text-blue-300 border border-blue-400/30'
+                  : 'bg-white/5 text-slate-500 border border-white/5 hover:bg-white/10'
+              }`}
+            >
+              <ShoppingCart className="w-5 h-5" />
+              <span>買い物</span>
             </button>
           </div>
 
