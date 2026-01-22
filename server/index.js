@@ -8,10 +8,37 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Supabase client
+// Supabase client with connection management
 const supabaseUrl = process.env.SUPABASE_URL || 'https://wwxtkfditekjjcrhydsl.supabase.co';
 const supabaseKey = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind3eHRrZmRpdGVrampjcmh5ZHNsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzMDQyODEsImV4cCI6MjA4Mzg4MDI4MX0.d-ehZ4BaX8u3XIrqWemoPv28Qy73Or1Wp-u9sL_qv8w';
 const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Retry wrapper for Supabase operations
+async function withRetry(operation, maxRetries = 3, delay = 1000) {
+  let lastError;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      console.log(`Supabase operation failed (attempt ${attempt + 1}/${maxRetries}):`, error.message);
+      if (attempt < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, delay * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
+// Check Supabase connection
+async function checkSupabaseConnection() {
+  try {
+    const { error } = await supabase.from('vapid_keys').select('id').limit(1);
+    return !error;
+  } catch {
+    return false;
+  }
+}
 
 // Middleware
 app.use(cors());
@@ -61,25 +88,45 @@ if (process.env.NODE_ENV === 'production') {
   }));
 }
 
-// Generate or retrieve VAPID keys
-async function getVapidKeys() {
-  const { data, error } = await supabase
-    .from('vapid_keys')
-    .select('*')
-    .eq('id', 1)
-    .single();
+// Cache for VAPID keys
+let cachedVapidKeys = null;
 
-  if (data) {
-    return { publicKey: data.public_key, privateKey: data.private_key };
+// Generate or retrieve VAPID keys with retry
+async function getVapidKeys() {
+  // Return cached keys if available
+  if (cachedVapidKeys) {
+    return cachedVapidKeys;
   }
 
-  // Generate new keys
-  const vapidKeys = webpush.generateVAPIDKeys();
-  await supabase
-    .from('vapid_keys')
-    .insert({ id: 1, public_key: vapidKeys.publicKey, private_key: vapidKeys.privateKey });
+  return withRetry(async () => {
+    const { data, error } = await supabase
+      .from('vapid_keys')
+      .select('*')
+      .eq('id', 1)
+      .single();
 
-  return vapidKeys;
+    if (error && error.code !== 'PGRST116') {
+      throw error;
+    }
+
+    if (data) {
+      cachedVapidKeys = { publicKey: data.public_key, privateKey: data.private_key };
+      return cachedVapidKeys;
+    }
+
+    // Generate new keys
+    const vapidKeys = webpush.generateVAPIDKeys();
+    const { error: insertError } = await supabase
+      .from('vapid_keys')
+      .insert({ id: 1, public_key: vapidKeys.publicKey, private_key: vapidKeys.privateKey });
+
+    if (insertError) {
+      throw insertError;
+    }
+
+    cachedVapidKeys = vapidKeys;
+    return cachedVapidKeys;
+  });
 }
 
 // API Routes
@@ -577,9 +624,14 @@ app.get('/api/analytics', async (req, res) => {
   }
 });
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// Health check with database status
+app.get('/api/health', async (req, res) => {
+  const dbConnected = await checkSupabaseConnection();
+  res.json({
+    status: dbConnected ? 'ok' : 'degraded',
+    database: dbConnected ? 'connected' : 'disconnected',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Serve client in production - catch-all for SPA
@@ -593,24 +645,31 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-// Start server
+// Start server - starts even if Supabase is unavailable
 async function startServer() {
-  try {
-    const vapidKeys = await getVapidKeys();
-    webpush.setVapidDetails(
-      'mailto:planner@example.com',
-      vapidKeys.publicKey,
-      vapidKeys.privateKey
-    );
-    console.log('VAPID Public Key:', vapidKeys.publicKey);
+  // Start HTTP server first (don't block on DB)
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
 
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+  // Initialize VAPID keys in background with retries
+  async function initVapidKeys() {
+    try {
+      const vapidKeys = await getVapidKeys();
+      webpush.setVapidDetails(
+        'mailto:planner@example.com',
+        vapidKeys.publicKey,
+        vapidKeys.privateKey
+      );
+      console.log('VAPID keys initialized successfully');
+      console.log('VAPID Public Key:', vapidKeys.publicKey);
+    } catch (error) {
+      console.error('Failed to initialize VAPID keys, will retry in 30s:', error.message);
+      setTimeout(initVapidKeys, 30000);
+    }
   }
+
+  initVapidKeys();
 }
 
 startServer();
