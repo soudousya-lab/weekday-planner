@@ -60,6 +60,8 @@ export default function WeekdayPlanner() {
     const events: ScheduleEvent[] = [];
     let currentTimeMinutes = arrivalHour * 60 + arrivalMinute;
     const bedTime = 23 * 60;
+    const bathDuration = 60;
+    const laundryDuration = hasLaundry ? 30 : 0;
 
     events.push({
       id: 'arrival',
@@ -70,9 +72,71 @@ export default function WeekdayPlanner() {
       type: 'marker',
     });
 
+    // Calculate dinner start time (18:30 or later)
+    const dinnerEarliestStart = 18 * 60 + 30; // 18:30
+    const dinnerStart = hasDinner ? Math.max(currentTimeMinutes, dinnerEarliestStart) : currentTimeMinutes;
+    const dinnerEnd = hasDinner ? dinnerStart + 60 : currentTimeMinutes;
+
+    // Bath starts right after dinner
+    const bathStart = dinnerEnd;
+    const bathEnd = bathStart + bathDuration;
+    const laundryEnd = bathEnd + laundryDuration;
+
+    // Calculate available time slots for study
+    const timeBeforeDinner = dinnerStart - currentTimeMinutes;
+    const timeAfterBathLaundry = bedTime - laundryEnd;
+
+    // Distribute study time across available slots
+    let remainingStudy = studyMinutes;
+    let studyBeforeDinner = 0;
+    let studyAfterBath = 0;
+
+    // First, allocate to after bath (preferred)
+    if (timeAfterBathLaundry > 0 && remainingStudy > 0) {
+      studyAfterBath = Math.min(remainingStudy, timeAfterBathLaundry);
+      remainingStudy -= studyAfterBath;
+    }
+
+    // Then, allocate remaining to before dinner
+    if (timeBeforeDinner > 0 && remainingStudy > 0) {
+      studyBeforeDinner = Math.min(remainingStudy, timeBeforeDinner);
+      remainingStudy -= studyBeforeDinner;
+    }
+
+    // Calculate free time
+    const freeTimeBeforeDinner = timeBeforeDinner - studyBeforeDinner;
+    const freeTimeAfterBath = timeAfterBathLaundry - studyAfterBath;
+
+    const hasMultipleStudySessions = studyBeforeDinner > 0 && studyAfterBath > 0;
+
+    // Schedule: Study before dinner (if any)
+    if (studyBeforeDinner > 0) {
+      events.push({
+        id: 'study1',
+        time: currentTimeMinutes,
+        duration: studyBeforeDinner,
+        label: hasMultipleStudySessions ? '英語学習①' : '英語学習',
+        icon: BookOpen,
+        type: 'task',
+      });
+      currentTimeMinutes += studyBeforeDinner;
+    }
+
+    // Free time before dinner (if any)
+    if (freeTimeBeforeDinner > 0) {
+      events.push({
+        id: 'free1',
+        time: currentTimeMinutes,
+        duration: freeTimeBeforeDinner,
+        label: '自由時間',
+        icon: Sparkles,
+        type: 'free',
+      });
+      currentTimeMinutes += freeTimeBeforeDinner;
+    }
+
+    // Dinner
     if (hasDinner) {
-      const dinnerEarliestStart = 18 * 60 + 30; // 18:30
-      const dinnerStart = Math.max(currentTimeMinutes, dinnerEarliestStart);
       events.push({
         id: 'dinner',
         time: dinnerStart,
@@ -81,66 +145,10 @@ export default function WeekdayPlanner() {
         icon: UtensilsCrossed,
         type: 'task',
       });
-      currentTimeMinutes = dinnerStart + 60;
+      currentTimeMinutes = dinnerEnd;
     }
 
-    const idealBathStart = 21 * 60;
-    const bathDuration = 60;
-    const laundryDuration = hasLaundry ? 30 : 0;
-
-    let bathStart: number;
-    if (currentTimeMinutes <= idealBathStart) {
-      bathStart = idealBathStart;
-    } else {
-      bathStart = currentTimeMinutes;
-    }
-
-    // Calculate time available before bath for study (part 1)
-    const freeTimeBeforeBath = bathStart - currentTimeMinutes;
-
-    // Calculate time available after bath+laundry until bedtime for study (part 2)
-    const timeAfterBathAndLaundry = bathStart + bathDuration + laundryDuration;
-    const freeTimeAfterBath = bedTime - timeAfterBathAndLaundry;
-
-    // Split study time: prioritize after bath, use before bath if needed
-    let studyPart1 = 0; // Before bath
-    let studyPart2 = Math.min(studyMinutes, freeTimeAfterBath); // After bath
-
-    // If not enough time after bath, use time before bath
-    if (studyPart2 < studyMinutes && freeTimeBeforeBath > 0) {
-      studyPart1 = Math.min(studyMinutes - studyPart2, freeTimeBeforeBath);
-    }
-
-    // Free time before bath (minus study part 1)
-    const actualFreeTimeBeforeBath = freeTimeBeforeBath - studyPart1;
-
-    // Add study part 1 (before bath) if exists
-    if (studyPart1 > 0) {
-      events.push({
-        id: 'study1',
-        time: currentTimeMinutes,
-        duration: studyPart1,
-        label: studyPart2 > 0 ? `英語学習①` : '英語学習',
-        icon: BookOpen,
-        type: 'task',
-      });
-      currentTimeMinutes += studyPart1;
-    }
-
-    // Add free time before bath if exists
-    if (actualFreeTimeBeforeBath > 0) {
-      events.push({
-        id: 'free1',
-        time: currentTimeMinutes,
-        duration: actualFreeTimeBeforeBath,
-        label: '自由時間',
-        icon: Sparkles,
-        type: 'free',
-      });
-      currentTimeMinutes += actualFreeTimeBeforeBath;
-    }
-
-    // Bath
+    // Bath (after dinner)
     events.push({
       id: 'bath',
       time: currentTimeMinutes,
@@ -164,25 +172,25 @@ export default function WeekdayPlanner() {
       currentTimeMinutes += 30;
     }
 
-    // Add study part 2 (after bath) if exists
-    if (studyPart2 > 0) {
+    // Study after bath (if any)
+    if (studyAfterBath > 0) {
       events.push({
         id: 'study2',
         time: currentTimeMinutes,
-        duration: studyPart2,
-        label: studyPart1 > 0 ? `英語学習②` : '英語学習',
+        duration: studyAfterBath,
+        label: hasMultipleStudySessions ? '英語学習②' : '英語学習',
         icon: BookOpen,
         type: 'task',
       });
-      currentTimeMinutes += studyPart2;
+      currentTimeMinutes += studyAfterBath;
     }
 
     // Free time after study
-    if (currentTimeMinutes < bedTime) {
+    if (freeTimeAfterBath > 0) {
       events.push({
         id: 'free2',
         time: currentTimeMinutes,
-        duration: bedTime - currentTimeMinutes,
+        duration: freeTimeAfterBath,
         label: '自由時間',
         icon: Sparkles,
         type: 'free',
