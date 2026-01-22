@@ -227,7 +227,7 @@ export default function WeekdayPlanner() {
     );
   };
 
-  const hours = Array.from({ length: 8 }, (_, i) => i + 17);
+  const hours = Array.from({ length: 24 }, (_, i) => i);
   // Minutes in 10-minute intervals: 0, 10, 20, 30, 40, 50
   const minutes = Array.from({ length: 6 }, (_, i) => i * 10);
 
